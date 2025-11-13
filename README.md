@@ -76,21 +76,3 @@ Once running:
 5. Click **“Purge DB”** to clear the database when done.
 
 ---
-
-## Optional: Run SQL Server via Docker
-
-If you don’t have SQL Server installed locally, you can quickly spin one up:
-
-```bash
-docker run -e 'ACCEPT_EULA=Y' -e 'SA_PASSWORD=YourStrong!Pass123' \
-   -p 1433:1433 --name sqlserver \
-   -d mcr.microsoft.com/mssql/server:2022-latest
-```
-
-Then update your connection strings to use:
-
-```
-Server=localhost,1433;User Id=sa;Password=YourStrong!Pass123;
-```
-
-
