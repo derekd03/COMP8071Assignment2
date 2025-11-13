@@ -3,8 +3,9 @@ using System.Collections.Generic;
 using System.Data;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Data.SqlClient;
+using Oracle.ManagedDataAccess.Client;
 using OfficeOpenXml;
+using Microsoft.Extensions.Configuration;
 
 namespace app.Controllers
 {
@@ -12,18 +13,14 @@ namespace app.Controllers
     [Route("api/[controller]")]
     public class ReportsController : ControllerBase
     {
-        private readonly SqlConnection _connection;
+        private readonly string _oltpConnectionString;
+        private readonly string _olapConnectionString;
 
-        public ReportsController(SqlConnection connection)
+        public ReportsController(IConfiguration configuration)
         {
-            _connection = connection;
+            _oltpConnectionString = configuration.GetConnectionString("OLTPConnection")!;
+            _olapConnectionString = configuration.GetConnectionString("OLAPConnection")!;
         }
-
-        // 4 human queries expressed in SQL
-        // retention  -> YoY client retention % (overall and per service)
-        // staffing   -> Monthly demand vs staffing capacity (8h per shift)
-        // profit     -> Profit by service (revenue - allocated payroll)
-        // damages    -> Damage report hotspots by asset type/location
 
         [HttpGet("analytics")]
         public async Task<IActionResult> GetAnalytics([FromQuery] string metric = "profit")
@@ -31,11 +28,13 @@ namespace app.Controllers
             var query = BuildAnalyticsSql(metric);
             var results = new List<Dictionary<string, object?>>();
 
+            using var connection = new OracleConnection(_olapConnectionString);
+            
             try
             {
-                await _connection.OpenAsync();
+                await connection.OpenAsync();
 
-                using var cmd = new SqlCommand(query, _connection);
+                using var cmd = new OracleCommand(query, connection);
                 using var reader = await cmd.ExecuteReaderAsync();
 
                 while (await reader.ReadAsync())
@@ -44,16 +43,36 @@ namespace app.Controllers
                     for (int i = 0; i < reader.FieldCount; i++)
                     {
                         var name = reader.GetName(i);
-                        var val = reader.IsDBNull(i) ? null : reader.GetValue(i);
-                        row[name] = val;
+                        
+                        try
+                        {
+                            if (reader.IsDBNull(i))
+                            {
+                                row[name] = null;
+                            }
+                            else
+                            {
+                                // Convert everything to string to avoid type conversion issues
+                                var value = reader.GetValue(i);
+                                row[name] = value?.ToString();
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            row[name] = $"Error: {ex.Message}";
+                        }
                     }
                     results.Add(row);
                 }
             }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { error = $"Database error: {ex.Message}", query = query });
+            }
             finally
             {
-                if (_connection.State != ConnectionState.Closed)
-                    await _connection.CloseAsync();
+                if (connection.State != ConnectionState.Closed)
+                    await connection.CloseAsync();
             }
 
             return Ok(results);
@@ -68,18 +87,21 @@ namespace app.Controllers
             var query = BuildAnalyticsSql(metric);
             var table = new DataTable();
 
+            // Create a new connection for each request
+            using var connection = new OracleConnection(_olapConnectionString);
+            
             try
             {
-                await _connection.OpenAsync();
+                await connection.OpenAsync();
 
-                using var cmd = new SqlCommand(query, _connection);
+                using var cmd = new OracleCommand(query, connection);
                 using var reader = await cmd.ExecuteReaderAsync();
                 table.Load(reader);
             }
             finally
             {
-                if (_connection.State != ConnectionState.Closed)
-                    await _connection.CloseAsync();
+                if (connection.State != ConnectionState.Closed)
+                    await connection.CloseAsync();
             }
 
             using var package = new ExcelPackage();
@@ -122,112 +144,223 @@ namespace app.Controllers
         {
             switch ((metric ?? "profit").ToLower())
             {
-                case "collectionrate": // repurposed -> monthly invoice collection rate
+                case "collectionrate":
                     return @"
-;WITH Monthly AS (
-    SELECT
-        DATEFROMPARTS(YEAR(InvoiceDate), MONTH(InvoiceDate), 1) AS MonthStart,
-        SUM(CAST(TotalAmount AS DECIMAL(18,2)))                                         AS TotalInvoiced,
-        SUM(CASE WHEN IsPaid = 1 THEN CAST(TotalAmount AS DECIMAL(18,2)) ELSE 0 END)   AS TotalPaid,
-        COUNT(*)                                                                        AS InvoiceCount,
-        SUM(CASE WHEN IsPaid = 1 THEN 1 ELSE 0 END)                                     AS PaidCount
-    FROM FactInvoice
-    GROUP BY DATEFROMPARTS(YEAR(InvoiceDate), MONTH(InvoiceDate), 1)
-)
-SELECT
-    FORMAT(MonthStart, 'yyyy-MM')                              AS [Month],
-    InvoiceCount,
-    PaidCount,
-    TotalInvoiced,
-    TotalPaid,
-    CASE WHEN TotalInvoiced = 0 THEN 0
-         ELSE (TotalPaid * 100.0 / TotalInvoiced) END          AS MetricValue  -- collection rate %
-FROM Monthly
-ORDER BY [Month];
-";
-
+                WITH Monthly AS (
+                    SELECT
+                        TRUNC(InvoiceDate, 'MM') AS MonthStart,
+                        SUM(TotalAmount) AS TotalInvoiced,
+                        SUM(CASE WHEN IsPaid = '1' THEN TotalAmount ELSE 0 END) AS TotalPaid,
+                        COUNT(*) AS InvoiceCount,
+                        SUM(CASE WHEN IsPaid = '1' THEN 1 ELSE 0 END) AS PaidCount
+                    FROM FactInvoice
+                    GROUP BY TRUNC(InvoiceDate, 'MM')
+                )
+                SELECT
+                    TO_CHAR(MonthStart, 'YYYY-MM') AS Month,
+                    InvoiceCount,
+                    PaidCount,
+                    TotalInvoiced,
+                    TotalPaid,
+                    CASE WHEN TotalInvoiced = 0 THEN 0
+                        ELSE (TotalPaid * 100 / TotalInvoiced) END AS MetricValue
+                FROM Monthly
+                ORDER BY Month";
 
                 case "staffing":
                     return @"
-SELECT
-    FORMAT(sa.ScheduledDate, 'yyyy-MM') AS [Month],
-    COUNT(sa.AssignedID) AS TotalScheduledServices,
-    COUNT(DISTINCT sh.ShiftID) AS TotalShifts,
-    (COUNT(sa.AssignedID) * 1.0 / NULLIF(COUNT(DISTINCT sh.ShiftID), 0)) AS ServicesPerShift
-FROM FactServiceAssignment sa
-LEFT JOIN FactShifts sh
-    ON FORMAT(sa.ScheduledDate, 'yyyy-MM') = FORMAT(sh.StartTime, 'yyyy-MM')
-GROUP BY FORMAT(sa.ScheduledDate, 'yyyy-MM')
-ORDER BY [Month];
-";
+                SELECT
+                    TO_CHAR(sa.ScheduledDate, 'YYYY-MM') AS Month,
+                    COUNT(sa.AssignedID) AS TotalScheduledServices,
+                    COUNT(DISTINCT sh.ShiftID) AS TotalShifts,
+                    (COUNT(sa.AssignedID) / CASE WHEN COUNT(DISTINCT sh.ShiftID)=0 THEN 1 ELSE COUNT(DISTINCT sh.ShiftID) END) AS ServicesPerShift
+                FROM FactServiceAssignment sa
+                LEFT JOIN FactShifts sh
+                    ON TO_CHAR(sa.ScheduledDate,'YYYY-MM') = TO_CHAR(sh.StartTime,'YYYY-MM')
+                GROUP BY TO_CHAR(sa.ScheduledDate, 'YYYY-MM')
+                ORDER BY Month";
+
                 case "damages":
                     return @"
-SELECT
-    a.AssetType,
-    a.Location,
-    COUNT(dr.ReportID) AS TotalReports,
-    AVG(CAST(dr.RepairCost AS DECIMAL(18,2))) AS AvgRepairCost,
-    SUM(CAST(dr.RepairCost AS DECIMAL(18,2))) AS MetricValue
-FROM FactDamageReport dr
-JOIN DimAsset a ON a.AssetID = dr.DimAssetAssetID
-GROUP BY a.AssetType, a.Location
-ORDER BY MetricValue DESC, TotalReports DESC;";
+                SELECT
+                    a.AssetType,
+                    a.Location,
+                    COUNT(dr.ReportID) AS TotalReports,
+                    NVL(AVG(dr.RepairCost), 0) AS AvgRepairCost,
+                    NVL(SUM(dr.RepairCost), 0) AS MetricValue
+                FROM DimAsset a
+                LEFT JOIN FactDamageReport dr ON a.AssetID = dr.DimAssetID
+                GROUP BY a.AssetType, a.Location
+                HAVING COUNT(dr.ReportID) > 0 OR SUM(NVL(dr.RepairCost, 0)) > 0
+                ORDER BY MetricValue DESC, TotalReports DESC";
 
                 case "profit":
                 default:
-                    // Revenue by service from FactInvoice.
-                    // Payroll allocation: for each employee, allocate their total payroll to services
-                    // in proportion to their assignment counts by service.
                     return @"
-;WITH Revenue AS (
-    SELECT
-        s.ServiceID,
-        s.ServiceName,
-        SUM(CAST(i.TotalAmount AS DECIMAL(18,2))) AS Revenue
-    FROM FactInvoice i
-    JOIN DimService s ON s.ServiceID = i.DimServiceServiceID
-    GROUP BY s.ServiceID, s.ServiceName
-),
-EmpPayroll AS (
-    SELECT
-        p.DimEmployeeEmployeeID AS EmployeeID,
-        SUM(CAST((p.BaseSalary + p.OverTimePay - p.Deductions) AS DECIMAL(18,2))) AS PayrollCost
-    FROM FactPayroll p
-    GROUP BY p.DimEmployeeEmployeeID
-),
-EmpAssign AS (
-    SELECT
-        sa.DimEmployeeEmployeeID AS EmployeeID,
-        sa.DimServiceServiceID AS ServiceID,
-        COUNT(*) AS AssignCount
-    FROM FactServiceAssignment sa
-    GROUP BY sa.DimEmployeeEmployeeID, sa.DimServiceServiceID
-),
-EmpAssignTotals AS (
-    SELECT
-        EmployeeID,
-        SUM(AssignCount) AS TotalAssigns
-    FROM EmpAssign
-    GROUP BY EmployeeID
-),
-AllocatedCost AS (
-    SELECT
-        ea.ServiceID,
-        SUM( ep.PayrollCost * (ea.AssignCount * 1.0 / NULLIF(eat.TotalAssigns, 0)) ) AS AllocatedPayroll
-    FROM EmpAssign ea
-    JOIN EmpAssignTotals eat ON eat.EmployeeID = ea.EmployeeID
-    JOIN EmpPayroll ep ON ep.EmployeeID = ea.EmployeeID
-    GROUP BY ea.ServiceID
-)
-SELECT
-    r.ServiceName,
-    r.Revenue,
-    ISNULL(ac.AllocatedPayroll, 0) AS AllocatedPayroll,
-    (r.Revenue - ISNULL(ac.AllocatedPayroll, 0)) AS MetricValue
-FROM Revenue r
-LEFT JOIN AllocatedCost ac ON ac.ServiceID = r.ServiceID
-ORDER BY MetricValue DESC, r.ServiceName;";
+                WITH Revenue AS (
+                    SELECT
+                        s.ServiceID,
+                        s.ServiceName,
+                        SUM(i.TotalAmount) AS Revenue
+                    FROM FactInvoice i
+                    JOIN DimService s ON s.ServiceID = i.DimServiceID
+                    GROUP BY s.ServiceID, s.ServiceName
+                ),
+                EmpPayroll AS (
+                    SELECT
+                        p.DimEmployeeID AS EmployeeID,
+                        SUM(p.BaseSalary + p.OverTimePay - p.Deductions) AS PayrollCost
+                    FROM FactPayroll p
+                    GROUP BY p.DimEmployeeID
+                ),
+                EmpAssign AS (
+                    SELECT
+                        sa.DimEmployeeID AS EmployeeID,
+                        sa.DimServiceID AS ServiceID,
+                        COUNT(*) AS AssignCount
+                    FROM FactServiceAssignment sa
+                    GROUP BY sa.DimEmployeeID, sa.DimServiceID
+                ),
+                EmpAssignTotals AS (
+                    SELECT
+                        EmployeeID,
+                        SUM(AssignCount) AS TotalAssigns
+                    FROM EmpAssign
+                    GROUP BY EmployeeID
+                ),
+                AllocatedCost AS (
+                    SELECT
+                        ea.ServiceID,
+                        SUM( ep.PayrollCost * (ea.AssignCount / CASE WHEN eat.TotalAssigns = 0 THEN 1 ELSE eat.TotalAssigns END) ) AS AllocatedPayroll
+                    FROM EmpAssign ea
+                    JOIN EmpAssignTotals eat ON eat.EmployeeID = ea.EmployeeID
+                    JOIN EmpPayroll ep ON ep.EmployeeID = ea.EmployeeID
+                    GROUP BY ea.ServiceID
+                )
+                SELECT
+                    r.ServiceName,
+                    r.Revenue,
+                    NVL(ac.AllocatedPayroll,0) AS AllocatedPayroll,
+                    (r.Revenue - NVL(ac.AllocatedPayroll,0)) AS MetricValue
+                FROM Revenue r
+                LEFT JOIN AllocatedCost ac ON ac.ServiceID = r.ServiceID
+                ORDER BY MetricValue DESC, r.ServiceName";
             }
+        }
+
+        [HttpGet("debug/olap-contents")]
+        public async Task<IActionResult> DebugOlapContents()
+        {
+            var results = new Dictionary<string, object>();
+            
+            using var connection = new OracleConnection(_olapConnectionString);
+            await connection.OpenAsync();
+
+            // Check table counts
+            var tables = new[] { 
+                "DimEmployee", "DimClient", "DimService", "DimAsset", "DimRenter",
+                "FactPayroll", "FactShifts", "FactServiceAssignment", "FactInvoice", 
+                "FactServiceRegistration", "FactDamageReport", "FactRentalHistory", "FactAttendance"
+            };
+            
+            var tableCounts = new Dictionary<string, int>();
+            foreach (var table in tables)
+            {
+                try
+                {
+                    using var cmd = new OracleCommand($"SELECT COUNT(*) FROM {table}", connection);
+                    var count = Convert.ToInt32(cmd.ExecuteScalar());
+                    tableCounts[table] = count;
+                }
+                catch (Exception ex)
+                {
+                    tableCounts[table] = -1;
+                }
+            }
+            results["TableCounts"] = tableCounts;
+
+            // Sample some data from key tables
+            var sampleData = new Dictionary<string, List<Dictionary<string, object>>>();
+            
+            // Sample FactInvoice data
+            try
+            {
+                using var cmd = new OracleCommand("SELECT * FROM FactInvoice WHERE ROWNUM <= 5", connection);
+                using var reader = await cmd.ExecuteReaderAsync();
+                var invoices = new List<Dictionary<string, object>>();
+                
+                while (await reader.ReadAsync())
+                {
+                    var row = new Dictionary<string, object>();
+                    for (int i = 0; i < reader.FieldCount; i++)
+                    {
+                        row[reader.GetName(i)] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+                    }
+                    invoices.Add(row);
+                }
+                sampleData["FactInvoice"] = invoices;
+            }
+            catch (Exception ex)
+            {
+                sampleData["FactInvoice"] = new List<Dictionary<string, object>> { new Dictionary<string, object> { { "error", ex.Message } } };
+            }
+
+            // Sample DimService data
+            try
+            {
+                using var cmd = new OracleCommand("SELECT * FROM DimService WHERE ROWNUM <= 5", connection);
+                using var reader = await cmd.ExecuteReaderAsync();
+                var services = new List<Dictionary<string, object>>();
+                
+                while (await reader.ReadAsync())
+                {
+                    var row = new Dictionary<string, object>();
+                    for (int i = 0; i < reader.FieldCount; i++)
+                    {
+                        row[reader.GetName(i)] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+                    }
+                    services.Add(row);
+                }
+                sampleData["DimService"] = services;
+            }
+            catch (Exception ex)
+            {
+                sampleData["DimService"] = new List<Dictionary<string, object>> { new Dictionary<string, object> { { "error", ex.Message } } };
+            }
+
+            results["SampleData"] = sampleData;
+
+            return Ok(results);
+        }
+
+        [HttpGet("debug/oltp-contents")]
+        public async Task<IActionResult> DebugOltpContents()
+        {
+            var results = new Dictionary<string, object>();
+            
+            using var connection = new OracleConnection(_oltpConnectionString);
+            await connection.OpenAsync();
+
+            // Check table counts in OLTP
+            var tables = new[] { "Employee", "Client", "ServiceType", "Asset", "Renter", "Payment", "Shift", "Service", "AssetRent" };
+            
+            var tableCounts = new Dictionary<string, int>();
+            foreach (var table in tables)
+            {
+                try
+                {
+                    using var cmd = new OracleCommand($"SELECT COUNT(*) FROM {table}", connection);
+                    var count = Convert.ToInt32(cmd.ExecuteScalar());
+                    tableCounts[table] = count;
+                }
+                catch (Exception ex)
+                {
+                    tableCounts[table] = -1; // Error indicator
+                }
+            }
+            results["TableCounts"] = tableCounts;
+
+            return Ok(results);
         }
     }
 }

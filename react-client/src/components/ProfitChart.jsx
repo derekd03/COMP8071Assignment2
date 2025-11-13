@@ -5,18 +5,10 @@ import { Printer, FileSpreadsheet, Eye, EyeOff, DatabaseBackup, DatabaseZap } fr
 
 import { useReward } from 'partycles';
 
-
-
-
-
 ChartJS.register(CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend);
 
 // --- Configuration ---
-const BASE_URL =
-  window.location.hostname === 'localhost'
-    ? `http://localhost:5292`
-    : 'https://taupekhana.tail2feabe.ts.net/chart.html';
-
+const BASE_URL = 'http://localhost:5292';
 
 const labelMap = {
   profit: 'Profit',
@@ -48,12 +40,21 @@ const ProfitChart = () => {
   // --- Common reusable fetch function ---
   const fetchMetricData = useCallback(async (metricName = metric) => {
     try {
-      const res = await fetch(`/api/reports/analytics?metric=${metricName}`);
+      setLoading(true);
+      // Use the full backend URL
+      const res = await fetch(`${BASE_URL}/api/reports/analytics?metric=${metricName}`);
+      if (!res.ok) {
+        throw new Error(`HTTP error! status: ${res.status}`);
+      }
       const jsonData = await res.json();
       setData(jsonData);
       setIsDbEmpty(jsonData.length === 0);
     } catch (err) {
       console.error('Failed to load data:', err);
+      setData([]);
+      setIsDbEmpty(true);
+    } finally {
+      setLoading(false);
     }
   }, [metric]);
 
@@ -100,6 +101,9 @@ const ProfitChart = () => {
     setLoading(true);
     try {
       const response = await fetch(`${BASE_URL}/api/reports/export?metric=${metric}`);
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -109,6 +113,7 @@ const ProfitChart = () => {
       URL.revokeObjectURL(url);
     } catch (err) {
       console.error('Download failed', err);
+      alert('Download failed. Please check if the backend is running.');
     } finally {
       setLoading(false);
     }
@@ -120,10 +125,14 @@ const ProfitChart = () => {
       : `${BASE_URL}/api/etl/purge`;
 
     try {
-      await fetch(endpoint, { method: 'GET' });
+      const response = await fetch(endpoint, { method: 'GET' });
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
       await fetchMetricData();
     } catch (err) {
       console.error('ETL action failed:', err);
+      alert('ETL action failed. Please check if the backend is running.');
     }
   };
 
@@ -161,7 +170,15 @@ const ProfitChart = () => {
       </header>
 
       <div id='rewardId' className="chart-wrapper">
-        <Bar data={chartData} options={chartOptions} />
+        {loading ? (
+          <div className="loading">Loading data...</div>
+        ) : data.length > 0 ? (
+          <Bar data={chartData} options={chartOptions} />
+        ) : (
+          <div className="no-data">
+            {isDbEmpty ? 'No data available. Run ETL to populate the database.' : 'No data found for this metric.'}
+          </div>
+        )}
       </div>
 
       {showTable && data.length > 0 && (
@@ -190,10 +207,5 @@ const ProfitChart = () => {
     </div>
   );
 };
-  
-
-//    <button id="rewardId" onClick={reward}>
-//      Click me!
-//    </button>
 
 export default ProfitChart;

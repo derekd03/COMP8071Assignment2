@@ -1,20 +1,24 @@
-using System.Data.Odbc;
-using System.Text;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Threading.Tasks;
+using Oracle.ManagedDataAccess.Client;
 
 public class ETLService
 {
     private readonly string _oltpConnectionString;
-    private readonly string _olapConnectionString;
+    public readonly string _olapConnectionString;
+
     public ETLService(string oltpConnectionString, string olapConnectionString)
     {
         _oltpConnectionString = oltpConnectionString;
         _olapConnectionString = olapConnectionString;
     }
 
-    public async Task RunETLAsync(StringBuilder log)
+    public async Task RunETLAsync(List<string> log)
     {
-        await using var oltpConn = new OdbcConnection(_oltpConnectionString);
-        await using var olapConn = new OdbcConnection(_olapConnectionString);
+        await using var oltpConn = new OracleConnection(_oltpConnectionString);
+        await using var olapConn = new OracleConnection(_olapConnectionString);
 
         await oltpConn.OpenAsync();
         await olapConn.OpenAsync();
@@ -35,354 +39,358 @@ public class ETLService
         await LoadFactRentalHistoryAsync(oltpConn, olapConn, log);
     }
 
-    public async Task ClearETLAsync(StringBuilder log)
-    {
-        await using var oltpConn = new OdbcConnection(_oltpConnectionString);
-        await using var olapConn = new OdbcConnection(_olapConnectionString);
-
-        await oltpConn.OpenAsync();
-        await olapConn.OpenAsync();
-
-        await ClearOlapTablesAsync(olapConn, log);
-    }
-
-    public async Task ClearOlapTablesAsync(OdbcConnection olapConn, StringBuilder log)
+    public async Task ClearOlapTablesAsync(OracleConnection olapConn, List<string> log)
     {
         var tables = new string[]
         {
-            "FactAttendance","FactPayroll","FactShifts","FactServiceAssignment","FactInvoice",
-            "FactServiceRegistration","FactDamageReport","FactRentalHistory",
-            "DimEmployee","DimClient","DimService","DimAsset","DimRenter"
+            "FactAttendance", "FactPayroll", "FactShifts", "FactServiceAssignment", "FactInvoice",
+            "FactServiceRegistration", "FactDamageReport", "FactRentalHistory",
+            "DimEmployee", "DimClient", "DimService", "DimAsset", "DimRenter"
         };
 
         foreach (var table in tables)
         {
-            log.AppendLine($"Clearing table {table}...");
-            // 1. Delete all records
-            using (var cmd = new OdbcCommand($"DELETE FROM {table};", olapConn))
+            try
             {
+                log.Add($"Clearing table {table}...");
+                using var cmd = new OracleCommand($"DELETE FROM {table}", olapConn);
                 await cmd.ExecuteNonQueryAsync();
             }
+            catch (Exception ex)
+            {
+                log.Add($"Error clearing {table}: {ex.Message}");
+            }
         }
-        log.AppendLine("All OLAP tables cleared.");
-    }
-    public async Task LoadDimEmployeesAsync(OdbcConnection oltpConn, OdbcConnection olapConn, StringBuilder log)
-    {
-        log.AppendLine("Loading DimEmployees...");
-        using var selectCmd = new OdbcCommand(
-            "SELECT EmployeeID, Name, Address, JobTitle, EmployeeType, SalaryRate, ReportsTo FROM Employee", oltpConn);
 
+        log.Add("All OLAP tables cleared.");
+    }
+
+    private async Task LoadDimEmployeesAsync(OracleConnection oltpConn, OracleConnection olapConn, List<string> log)
+    {
+        log.Add("Loading DimEmployees...");
+        using var selectCmd = new OracleCommand("SELECT EmployeeID, Name, Address, JobTitle, EmployeeType, SalaryRate, ReportsTo FROM Employee", oltpConn);
         using var reader = await selectCmd.ExecuteReaderAsync();
+        int count = 0;
+        
         while (await reader.ReadAsync())
         {
-            var insertCmd = new OdbcCommand(
-                "INSERT INTO DimEmployee (EmployeeID, Name, Address, JobTitle, EmployeeType, SalaryRate, ReportsTo) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?)", olapConn);
+            using var insertCmd = new OracleCommand(
+                @"INSERT INTO DimEmployee 
+                  (EmployeeID, Name, Address, JobTitle, EmployeeType, SalaryRate, ReportsTo)
+                  VALUES (:EmployeeID, :Name, :Address, :JobTitle, :EmployeeType, :SalaryRate, :ReportsTo)", olapConn);
 
-            insertCmd.Parameters.AddWithValue("@EmployeeID", reader["EmployeeID"]);
-            insertCmd.Parameters.AddWithValue("@Name", reader["Name"]);
-            insertCmd.Parameters.AddWithValue("@Address", reader["Address"]);
-            insertCmd.Parameters.AddWithValue("@JobTitle", reader["JobTitle"]);
-            insertCmd.Parameters.AddWithValue("@EmployeeType", reader["EmployeeType"]);
-            insertCmd.Parameters.AddWithValue("@SalaryRate", reader["SalaryRate"]);
-            insertCmd.Parameters.AddWithValue("@ReportsTo", reader["ReportsTo"] is DBNull ? DBNull.Value : reader["ReportsTo"]);
+            insertCmd.Parameters.Add("EmployeeID", reader["EmployeeID"]);
+            insertCmd.Parameters.Add("Name", reader["Name"]);
+            insertCmd.Parameters.Add("Address", reader["Address"]);
+            insertCmd.Parameters.Add("JobTitle", reader["JobTitle"]);
+            insertCmd.Parameters.Add("EmployeeType", reader["EmployeeType"]);
+            insertCmd.Parameters.Add("SalaryRate", reader["SalaryRate"]);
+            insertCmd.Parameters.Add("ReportsTo", reader["ReportsTo"] is DBNull ? DBNull.Value : reader["ReportsTo"]);
 
             await insertCmd.ExecuteNonQueryAsync();
-            log.AppendLine($"Inserted EmployeeID {reader["EmployeeID"]}");
+            count++;
         }
-        log.AppendLine("DimEmployees loaded successfully.");
+        log.Add($"DimEmployees loaded successfully. {count} records inserted.");
     }
-    public async Task LoadDimClientsAsync(OdbcConnection oltpConn, OdbcConnection olapConn, StringBuilder log)
-    {
-        log.AppendLine("Loading DimClients...");
-        using var reader = await new OdbcCommand("SELECT ClientID, Name, Address, ContactInfo FROM Client", oltpConn)
-            .ExecuteReaderAsync();
 
+    private async Task LoadDimClientsAsync(OracleConnection oltpConn, OracleConnection olapConn, List<string> log)
+    {
+        log.Add("Loading DimClients...");
+        using var reader = await new OracleCommand("SELECT ClientID, Name, Address, ContactInfo FROM Client", oltpConn).ExecuteReaderAsync();
+        int count = 0;
+        
         while (await reader.ReadAsync())
         {
-            var cmd = new OdbcCommand(
-                "INSERT INTO DimClient (ClientID, Name, Address, ContactInfo) VALUES (?, ?, ?, ?)", olapConn);
-            cmd.Parameters.AddWithValue("@ClientID", reader["ClientID"]);
-            cmd.Parameters.AddWithValue("@Name", reader["Name"]);
-            cmd.Parameters.AddWithValue("@Address", reader["Address"]);
-            cmd.Parameters.AddWithValue("@ContactInfo", reader["ContactInfo"]);
-            await cmd.ExecuteNonQueryAsync();
-            log.AppendLine($"Inserted ClientID {reader["ClientID"]}");
-        }
-        log.AppendLine("DimClients loaded successfully.");
-    }
-    public async Task LoadDimServicesAsync(OdbcConnection oltpConn, OdbcConnection olapConn, StringBuilder log)
-    {
-        log.AppendLine("Loading DimServices...");
-        using var reader = await new OdbcCommand(
-            @"SELECT st.ServiceTypeID, st.ServiceName, st.Rate, st.RequiresCertification
-              FROM ServiceType st", oltpConn).ExecuteReaderAsync();
+            using var cmd = new OracleCommand(
+                @"INSERT INTO DimClient (ClientID, Name, Address, ContactInfo) 
+                  VALUES (:ClientID, :Name, :Address, :ContactInfo)", olapConn);
 
+            cmd.Parameters.Add("ClientID", reader["ClientID"]);
+            cmd.Parameters.Add("Name", reader["Name"]);
+            cmd.Parameters.Add("Address", reader["Address"]);
+            cmd.Parameters.Add("ContactInfo", reader["ContactInfo"]);
+
+            await cmd.ExecuteNonQueryAsync();
+            count++;
+        }
+        log.Add($"DimClients loaded successfully. {count} records inserted.");
+    }
+
+    private async Task LoadDimServicesAsync(OracleConnection oltpConn, OracleConnection olapConn, List<string> log)
+    {
+        log.Add("Loading DimServices...");
+        using var reader = await new OracleCommand("SELECT ServiceTypeID, ServiceName, Rate, RequiresCertification FROM ServiceType", oltpConn).ExecuteReaderAsync();
+        int count = 0;
+        
         while (await reader.ReadAsync())
         {
-            var cmd = new OdbcCommand(
-                "INSERT INTO DimService (ServiceID, ServiceName, Rate, RequiresCertification) VALUES (?, ?, ?, ?)", olapConn);
-            cmd.Parameters.AddWithValue("@ServiceID", reader["ServiceTypeID"]);
-            cmd.Parameters.AddWithValue("@ServiceName", reader["ServiceName"]);
-            cmd.Parameters.AddWithValue("@Rate", reader["Rate"]);
-            cmd.Parameters.AddWithValue("@RequiresCertification", reader["RequiresCertification"]);
-            await cmd.ExecuteNonQueryAsync();
-            log.AppendLine($"Inserted ServiceID {reader["ServiceTypeID"]}");
-        }
-        log.AppendLine("DimServices loaded successfully.");
-    }
-    public async Task LoadDimAssetsAsync(OdbcConnection oltpConn, OdbcConnection olapConn, StringBuilder log)
-    {
-        log.AppendLine("Loading DimAssets...");
-        using var reader = await new OdbcCommand("SELECT AssetID, AssetType, Location, MonthlyRent FROM Asset", oltpConn)
-            .ExecuteReaderAsync();
+            using var cmd = new OracleCommand(
+                @"INSERT INTO DimService (ServiceID, ServiceName, Rate, RequiresCertification) 
+                  VALUES (:ServiceID, :ServiceName, :Rate, :RequiresCertification)", olapConn);
 
+            cmd.Parameters.Add("ServiceID", reader["ServiceTypeID"]);
+            cmd.Parameters.Add("ServiceName", reader["ServiceName"]);
+            cmd.Parameters.Add("Rate", reader["Rate"]);
+            cmd.Parameters.Add("RequiresCertification", reader["RequiresCertification"]);
+
+            await cmd.ExecuteNonQueryAsync();
+            count++;
+        }
+        log.Add($"DimServices loaded successfully. {count} records inserted.");
+    }
+
+    private async Task LoadDimAssetsAsync(OracleConnection oltpConn, OracleConnection olapConn, List<string> log)
+    {
+        log.Add("Loading DimAssets...");
+        using var reader = await new OracleCommand("SELECT AssetID, AssetType, Location, MonthlyRent FROM Asset", oltpConn).ExecuteReaderAsync();
+        int count = 0;
+        
         while (await reader.ReadAsync())
         {
-            var cmd = new OdbcCommand(
-                "INSERT INTO DimAsset (AssetID, AssetType, Location, MonthlyRent) VALUES (?, ?, ?, ?)", olapConn);
-            cmd.Parameters.AddWithValue("@AssetID", reader["AssetID"]);
-            cmd.Parameters.AddWithValue("@AssetType", reader["AssetType"]);
-            cmd.Parameters.AddWithValue("@Location", reader["Location"]);
-            cmd.Parameters.AddWithValue("@MonthlyRent", reader["MonthlyRent"]);
+            using var cmd = new OracleCommand(
+                @"INSERT INTO DimAsset (AssetID, AssetType, Location, MonthlyRent) 
+                  VALUES (:AssetID, :AssetType, :Location, :MonthlyRent)", olapConn);
+
+            cmd.Parameters.Add("AssetID", reader["AssetID"]);
+            cmd.Parameters.Add("AssetType", reader["AssetType"]);
+            cmd.Parameters.Add("Location", reader["Location"]);
+            cmd.Parameters.Add("MonthlyRent", reader["MonthlyRent"]);
+
             await cmd.ExecuteNonQueryAsync();
-            log.AppendLine($"Inserted AssetID {reader["AssetID"]}");
+            count++;
         }
-        log.AppendLine("DimAssets loaded successfully.");
+        log.Add($"DimAssets loaded successfully. {count} records inserted.");
     }
 
-    public async Task LoadDimRentersAsync(OdbcConnection oltpConn, OdbcConnection olapConn, StringBuilder log)
+    private async Task LoadDimRentersAsync(OracleConnection oltpConn, OracleConnection olapConn, List<string> log)
     {
-        log.AppendLine("Loading DimRenters...");
-        using var reader = await new OdbcCommand("SELECT RenterID, Name, EmergencyContact, FamilyDoctor FROM Renter", oltpConn)
-            .ExecuteReaderAsync();
-
+        log.Add("Loading DimRenters...");
+        using var reader = await new OracleCommand("SELECT RenterID, Name, EmergencyContact, FamilyDoctor FROM Renter", oltpConn).ExecuteReaderAsync();
+        int count = 0;
+        
         while (await reader.ReadAsync())
         {
-            var cmd = new OdbcCommand(
-                "INSERT INTO DimRenter (RenterID, Name, EmergencyContact, FamilyDoctor) VALUES (?, ?, ?, ?)", olapConn);
-            cmd.Parameters.AddWithValue("@RenterID", reader["RenterID"]);
-            cmd.Parameters.AddWithValue("@Name", reader["Name"]);
-            cmd.Parameters.AddWithValue("@EmergencyContact", reader["EmergencyContact"]);
-            cmd.Parameters.AddWithValue("@FamilyDoctor", reader["FamilyDoctor"]);
+            using var cmd = new OracleCommand(
+                @"INSERT INTO DimRenter (RenterID, Name, EmergencyContact, FamilyDoctor) 
+                  VALUES (:RenterID, :Name, :EmergencyContact, :FamilyDoctor)", olapConn);
+
+            cmd.Parameters.Add("RenterID", reader["RenterID"]);
+            cmd.Parameters.Add("Name", reader["Name"]);
+            cmd.Parameters.Add("EmergencyContact", reader["EmergencyContact"]);
+            cmd.Parameters.Add("FamilyDoctor", reader["FamilyDoctor"]);
+
             await cmd.ExecuteNonQueryAsync();
-            log.AppendLine($"Inserted RenterID {reader["RenterID"]}");
+            count++;
         }
-        log.AppendLine("DimRenters loaded successfully.");
+        log.Add($"DimRenters loaded successfully. {count} records inserted.");
     }
-    public async Task LoadFactPayrollAsync(OdbcConnection oltpConn, OdbcConnection olapConn, StringBuilder log)
+
+    private async Task LoadFactPayrollAsync(OracleConnection oltpConn, OracleConnection olapConn, List<string> log)
     {
-        log.AppendLine("Loading FactPayroll...");
-        using var reader = await new OdbcCommand(
-            "SELECT PaymentID, EmployeeID, PayDate, OverTimePay, Deductions, BasePay FROM Payment", oltpConn)
-            .ExecuteReaderAsync();
-
-        Random rand = new Random();
-
+        log.Add("Loading FactPayroll...");
+        using var reader = await new OracleCommand("SELECT PaymentID, EmployeeID, PayDate, OverTimePay, Deductions, BasePay FROM Payment", oltpConn).ExecuteReaderAsync();
+        int count = 0;
+        
         while (await reader.ReadAsync())
-        {   
-            int iBase = reader.GetOrdinal("BasePay");
-            int iOT = reader.GetOrdinal("OverTimePay");
-            int iDed = reader.GetOrdinal("Deductions");
-            decimal basePay =
-                reader.IsDBNull(iBase)
-                    ? 0m
-                    : Convert.ToDecimal(reader.GetValue(iBase));
-            decimal overTime =
-                reader.IsDBNull(iOT)
-                    ? 0m
-                    : Convert.ToDecimal(reader.GetValue(iOT));
-            decimal deductions =
-                reader.IsDBNull(iDed)
-                    ? 0m
-                    : Convert.ToDecimal(reader.GetValue(iDed));
-
+        {
+            decimal basePay = reader["BasePay"] is DBNull ? 0 : Convert.ToDecimal(reader["BasePay"]);
+            decimal overTime = reader["OverTimePay"] is DBNull ? 0 : Convert.ToDecimal(reader["OverTimePay"]);
+            decimal deductions = reader["Deductions"] is DBNull ? 0 : Convert.ToDecimal(reader["Deductions"]);
             decimal netPay = basePay + overTime - deductions;
-            var cmd = new OdbcCommand(
+
+            using var cmd = new OracleCommand(
                 @"INSERT INTO FactPayroll 
-                (PayrollID, DimEmployeeEmployeeID, PayDate, BaseSalary, OverTimePay, Deductions, NetPay) 
-                VALUES (?, ?, ?, ?, ?, ?, ?)", olapConn);
-            cmd.Parameters.AddWithValue("@PayrollID", reader["PaymentID"]);
-            cmd.Parameters.AddWithValue("@DimEmployeeEmployeeID", reader["EmployeeID"]);
-            cmd.Parameters.AddWithValue("@PayDate", reader["PayDate"]);
-            cmd.Parameters.AddWithValue("@BaseSalary", reader["basePay"]);
-            cmd.Parameters.AddWithValue("@OverTimePay", reader["OverTimePay"]);
-            cmd.Parameters.AddWithValue("@Deductions", reader["Deductions"]);
-            cmd.Parameters.AddWithValue("@NetPay", netPay);
-            await cmd.ExecuteNonQueryAsync();
-            log.AppendLine($"Inserted PayrollID {reader["PaymentID"]}");
-        }
-        log.AppendLine("FactPayroll loaded successfully.");
-    }
-    public async Task LoadFactShiftsAsync(OdbcConnection oltpConn, OdbcConnection olapConn, StringBuilder log)
-    {
-        log.AppendLine("Loading FactShifts...");
-        using var reader = await new OdbcCommand(
-            "SELECT ShiftID, EmployeeID, StartTime, EndTime, IsOnCall FROM Shift", oltpConn)
-            .ExecuteReaderAsync();
+                  (PayrollID, DimEmployeeID, PayDate, BaseSalary, OverTimePay, Deductions, NetPay)
+                  VALUES (:PayrollID, :EmployeeID, :PayDate, :BaseSalary, :OverTimePay, :Deductions, :NetPay)", olapConn);
 
-        while (await reader.ReadAsync())
-        {
-            var cmd = new OdbcCommand(
-                @"INSERT INTO FactShifts 
-                (ShiftID, DimEmployeeEmployeeID, StartTime, EndTime, IsOnCall) 
-                VALUES (?, ?, ?, ?, ?)", olapConn);
-
-            cmd.Parameters.AddWithValue("@ShiftID", reader["ShiftID"]);
-            cmd.Parameters.AddWithValue("@DimEmployeeEmployeeID", reader["EmployeeID"]);
-            cmd.Parameters.AddWithValue("@StartTime", reader["StartTime"]);
-            cmd.Parameters.AddWithValue("@EndTime", reader["EndTime"]);
-            cmd.Parameters.AddWithValue("@IsOnCall", reader["IsOnCall"]);
+            cmd.Parameters.Add("PayrollID", reader["PaymentID"]);
+            cmd.Parameters.Add("EmployeeID", reader["EmployeeID"]);
+            cmd.Parameters.Add("PayDate", reader["PayDate"]);
+            cmd.Parameters.Add("BaseSalary", basePay);
+            cmd.Parameters.Add("OverTimePay", overTime);
+            cmd.Parameters.Add("Deductions", deductions);
+            cmd.Parameters.Add("NetPay", netPay);
 
             await cmd.ExecuteNonQueryAsync();
-            log.AppendLine($"Inserted ShiftID {reader["ShiftID"]}");
+            count++;
         }
-        log.AppendLine("FactShifts loaded successfully.");
+        log.Add($"FactPayroll loaded successfully. {count} records inserted.");
     }
-    public async Task LoadFactAttendanceAsync(OdbcConnection oltpConn, OdbcConnection olapConn, StringBuilder log)
+
+    private async Task LoadFactShiftsAsync(OracleConnection oltpConn, OracleConnection olapConn, List<string> log)
     {
-        log.AppendLine("Loading FactAttendance...");
-        using var reader = await new OdbcCommand(
-        @"SELECT s.ShiftID, s.EmployeeID, s.IsOnCall 
-          FROM Shift s", oltpConn)
-        .ExecuteReaderAsync();
+        log.Add("Loading FactShifts...");
+        using var reader = await new OracleCommand("SELECT ShiftID, EmployeeID, StartTime, EndTime, IsOnCall FROM Shift", oltpConn).ExecuteReaderAsync();
+        int count = 0;
+        
         while (await reader.ReadAsync())
         {
-            var cmd = new OdbcCommand(
-                @"INSERT INTO FactAttendance 
-                (AttendanceID, DimEmployeeEmployeeID, DimFactShiftsShiftID, IsHoliday, IsVacation, IsOnCall) 
-                VALUES (?, ?, ?, 0, 0, ?)", olapConn);
+            using var cmd = new OracleCommand(
+                @"INSERT INTO FactShifts (ShiftID, DimEmployeeID, StartTime, EndTime, IsOnCall)
+                  VALUES (:ShiftID, :EmployeeID, :StartTime, :EndTime, :IsOnCall)", olapConn);
 
-            cmd.Parameters.AddWithValue("@AttendanceID", reader["ShiftID"]); // using ShiftID as AttendanceID for demo
-            cmd.Parameters.AddWithValue("@DimEmployeeEmployeeID", reader["EmployeeID"]);
-            cmd.Parameters.AddWithValue("@DimFactShiftsShiftID", reader["ShiftID"]);
-            cmd.Parameters.AddWithValue("@IsOnCall", reader["IsOnCall"]);
+            cmd.Parameters.Add("ShiftID", reader["ShiftID"]);
+            cmd.Parameters.Add("EmployeeID", reader["EmployeeID"]);
+            cmd.Parameters.Add("StartTime", reader["StartTime"]);
+            cmd.Parameters.Add("EndTime", reader["EndTime"]);
+            cmd.Parameters.Add("IsOnCall", reader["IsOnCall"]);
 
             await cmd.ExecuteNonQueryAsync();
-            log.AppendLine($"Inserted AttendanceID {reader["ShiftID"]}");
+            count++;
         }
-        log.AppendLine("FactAttendance loaded successfully.");
+        log.Add($"FactShifts loaded successfully. {count} records inserted.");
     }
-    public async Task LoadFactServiceAssignmentAsync(OdbcConnection oltpConn, OdbcConnection olapConn, StringBuilder log)
+
+    private async Task LoadFactAttendanceAsync(OracleConnection oltpConn, OracleConnection olapConn, List<string> log)
     {
-        log.AppendLine("Loading FactServiceAssignment...");
-        using var reader = await new OdbcCommand(
-        @"SELECT ServiceID, ServiceTypeID, EmployeeID, ScheduledDate FROM Service", oltpConn)
-        .ExecuteReaderAsync();
+        log.Add("Loading FactAttendance...");
+        using var reader = await new OracleCommand("SELECT ShiftID, EmployeeID, IsOnCall FROM Shift", oltpConn).ExecuteReaderAsync();
+        int count = 0;
+        
         while (await reader.ReadAsync())
         {
-            var cmd = new OdbcCommand(
-                @"INSERT INTO FactServiceAssignment 
-                (AssignedID, DimEmployeeEmployeeID, DimServiceServiceID, ScheduledDate) 
-                VALUES (?, ?, ?, ?)", olapConn);
+            using var cmd = new OracleCommand(
+                @"INSERT INTO FactAttendance (AttendanceID, DimEmployeeID, FactShiftsID, IsHoliday, IsVacation, IsOnCall)
+                  VALUES (:AttendanceID, :EmployeeID, :ShiftID, '0', '0', :IsOnCall)", olapConn);
 
-            cmd.Parameters.AddWithValue("@AssignedID", reader["ServiceID"]);
-            cmd.Parameters.AddWithValue("@DimEmployeeEmployeeID", reader["EmployeeID"]);
-            cmd.Parameters.AddWithValue("@DimServiceServiceID", reader["ServiceTypeID"]);
-            cmd.Parameters.AddWithValue("@ScheduledDate", reader["ScheduledDate"]);
+            cmd.Parameters.Add("AttendanceID", reader["ShiftID"]);
+            cmd.Parameters.Add("EmployeeID", reader["EmployeeID"]);
+            cmd.Parameters.Add("ShiftID", reader["ShiftID"]);
+            cmd.Parameters.Add("IsOnCall", reader["IsOnCall"]);
 
             await cmd.ExecuteNonQueryAsync();
-            log.AppendLine($"Inserted AssignedID {reader["ServiceID"]}");
+            count++;
         }
-        log.AppendLine("FactServiceAssignment loaded successfully.");
+        log.Add($"FactAttendance loaded successfully. {count} records inserted.");
     }
 
-    public async Task LoadFactInvoiceAsync(OdbcConnection oltpConn, OdbcConnection olapConn, StringBuilder log)
+    private async Task LoadFactServiceAssignmentAsync(OracleConnection oltpConn, OracleConnection olapConn, List<string> log)
     {
-        log.AppendLine("Loading FactInvoice...");
-        using var reader = await new OdbcCommand(
-            @"SELECT ServiceID, ServiceTypeID, ClientID, ScheduledDate, TotalAmount, IsPaid FROM Service", oltpConn)
-            .ExecuteReaderAsync();
-
+        log.Add("Loading FactServiceAssignment...");
+        using var reader = await new OracleCommand("SELECT ServiceID, ServiceTypeID, EmployeeID, ScheduledDate FROM Service", oltpConn).ExecuteReaderAsync();
+        int count = 0;
+        
         while (await reader.ReadAsync())
         {
-            var cmd = new OdbcCommand(
-                @"INSERT INTO FactInvoice 
-                (InvoiceID, DimClientClientID, DimServiceServiceID, InvoiceDate, TotalAmount, IsPaid) 
-                VALUES (?, ?, ?, ?, ?, ?)", olapConn);
+            using var cmd = new OracleCommand(
+                @"INSERT INTO FactServiceAssignment (AssignedID, DimEmployeeID, DimServiceID, ScheduledDate)
+                  VALUES (:AssignedID, :EmployeeID, :ServiceID, :ScheduledDate)", olapConn);
 
-            cmd.Parameters.AddWithValue("@InvoiceID", reader["ServiceID"]);
-            cmd.Parameters.AddWithValue("@DimClientClientID", reader["ClientID"]);
-            cmd.Parameters.AddWithValue("@DimServiceServiceID", reader["ServiceTypeID"]);
-            cmd.Parameters.AddWithValue("@InvoiceDate", reader["ScheduledDate"]);
-            cmd.Parameters.AddWithValue("@TotalAmount", reader["TotalAmount"]);
-            cmd.Parameters.AddWithValue("@IsPaid", reader["IsPaid"]);
+            cmd.Parameters.Add("AssignedID", reader["ServiceID"]);
+            cmd.Parameters.Add("EmployeeID", reader["EmployeeID"]);
+            cmd.Parameters.Add("ServiceID", reader["ServiceTypeID"]);
+            cmd.Parameters.Add("ScheduledDate", reader["ScheduledDate"]);
 
             await cmd.ExecuteNonQueryAsync();
-            log.AppendLine($"Inserted InvoiceID {reader["ServiceID"]}");
+            count++;
         }
-        log.AppendLine("FactInvoice loaded successfully.");
+        log.Add($"FactServiceAssignment loaded successfully. {count} records inserted.");
     }
-    public async Task LoadFactServiceRegistrationAsync(OdbcConnection oltpConn, OdbcConnection olapConn, StringBuilder log)
-    {
-        log.AppendLine("Loading FactServiceRegistration...");
-        using var reader = await new OdbcCommand(
-            @"SELECT ServiceID, ServiceTypeID, ClientID, RegistrationDate FROM Service", oltpConn)
-            .ExecuteReaderAsync();
 
+    private async Task LoadFactInvoiceAsync(OracleConnection oltpConn, OracleConnection olapConn, List<string> log)
+    {
+        log.Add("Loading FactInvoice...");
+        using var reader = await new OracleCommand("SELECT ServiceID, ServiceTypeID, ClientID, ScheduledDate, TotalAmount, IsPaid FROM Service", oltpConn).ExecuteReaderAsync();
+        int count = 0;
+        
         while (await reader.ReadAsync())
         {
-            var cmd = new OdbcCommand(
-                @"INSERT INTO FactServiceRegistration 
-                (RegistrationID, DimClientClientID, DimServiceServiceID, RegistrationDate) 
-                VALUES (?, ?, ?, ?)", olapConn);
+            using var cmd = new OracleCommand(
+                @"INSERT INTO FactInvoice (InvoiceID, DimClientID, DimServiceID, InvoiceDate, TotalAmount, IsPaid)
+                  VALUES (:InvoiceID, :ClientID, :ServiceID, :InvoiceDate, :TotalAmount, :IsPaid)", olapConn);
 
-            cmd.Parameters.AddWithValue("@RegistrationID", reader["ServiceID"]);
-            cmd.Parameters.AddWithValue("@DimClientClientID", reader["ClientID"]);
-            cmd.Parameters.AddWithValue("@DimServiceServiceID", reader["ServiceTypeID"]);
-            cmd.Parameters.AddWithValue("@RegistrationDate", reader["RegistrationDate"]);
+            cmd.Parameters.Add("InvoiceID", reader["ServiceID"]);
+            cmd.Parameters.Add("ClientID", reader["ClientID"]);
+            cmd.Parameters.Add("ServiceID", reader["ServiceTypeID"]);
+            cmd.Parameters.Add("InvoiceDate", reader["ScheduledDate"]);
+            cmd.Parameters.Add("TotalAmount", reader["TotalAmount"]);
+            cmd.Parameters.Add("IsPaid", reader["IsPaid"]);
 
             await cmd.ExecuteNonQueryAsync();
-            log.AppendLine($"Inserted RegistrationID {reader["ServiceID"]}");
+            count++;
         }
-        log.AppendLine("FactServiceRegistration loaded successfully.");
+        log.Add($"FactInvoice loaded successfully. {count} records inserted.");
     }
-    public async Task LoadFactDamageReportAsync(OdbcConnection oltpConn, OdbcConnection olapConn, StringBuilder log)
-    {
-        log.AppendLine("Loading FactDamageReport...");
-        using var reader = await new OdbcCommand(
-            @"SELECT AssetID FROM Asset", oltpConn)
-            .ExecuteReaderAsync();
 
+    private async Task LoadFactServiceRegistrationAsync(OracleConnection oltpConn, OracleConnection olapConn, List<string> log)
+    {
+        log.Add("Loading FactServiceRegistration...");
+        using var reader = await new OracleCommand("SELECT ServiceID, ServiceTypeID, ClientID, RegistrationDate FROM Service", oltpConn).ExecuteReaderAsync();
+        int count = 0;
+        
         while (await reader.ReadAsync())
         {
-            var cmd = new OdbcCommand(
-                @"INSERT INTO FactDamageReport 
-                (DimAssetAssetID, ReportDate, RepairCost, Description) 
-                VALUES (?, GETDATE(), ?, ?); SELECT SCOPE_IDENTITY();", olapConn);
+            using var cmd = new OracleCommand(
+                @"INSERT INTO FactServiceRegistration (RegistrationID, DimClientID, DimServiceID, RegistrationDate)
+                  VALUES (:RegistrationID, :ClientID, :ServiceID, :RegistrationDate)", olapConn);
 
-            cmd.Parameters.AddWithValue("@DimAssetAssetID", reader["AssetID"]);
-            cmd.Parameters.AddWithValue("@RepairCost", Random.Shared.NextInt64(100, 500));
-            cmd.Parameters.AddWithValue("@Description", "Auto-generated damage report");
+            cmd.Parameters.Add("RegistrationID", reader["ServiceID"]);
+            cmd.Parameters.Add("ClientID", reader["ClientID"]);
+            cmd.Parameters.Add("ServiceID", reader["ServiceTypeID"]);
+            cmd.Parameters.Add("RegistrationDate", reader["RegistrationDate"]);
 
-            var newId = Convert.ToInt32(await cmd.ExecuteScalarAsync());
-            log.AppendLine($"Inserted ReportID {newId}");
+            await cmd.ExecuteNonQueryAsync();
+            count++;
         }
-        log.AppendLine("FactDamageReport loaded successfully.");
+        log.Add($"FactServiceRegistration loaded successfully. {count} records inserted.");
     }
-    public async Task LoadFactRentalHistoryAsync(OdbcConnection oltpConn, OdbcConnection olapConn, StringBuilder log)
-    {
-        log.AppendLine("Loading FactRentalHistory...");
-        using var reader = await new OdbcCommand(
-            @"SELECT ar.AssetRentID, ar.AssetID, ar.RenterID, ar.StartDate, ar.EndDate, a.MonthlyRent FROM AssetRent ar JOIN Asset a ON ar.AssetID = a.AssetID;", oltpConn)
-            .ExecuteReaderAsync();
 
+    private async Task LoadFactDamageReportAsync(OracleConnection oltpConn, OracleConnection olapConn, List<string> log)
+    {
+        log.Add("Loading FactDamageReport...");
+            
+            using var assetReader = await new OracleCommand("SELECT AssetID FROM Asset", oltpConn).ExecuteReaderAsync();
+            int count = 0;
+            int reportId = 1;
+            
+            while (await assetReader.ReadAsync())
+            {
+                try
+                {
+                    using var cmd = new OracleCommand(
+                        @"INSERT INTO FactDamageReport (ReportID, DimAssetID, ReportDate, RepairCost, Description)
+                        VALUES (:ReportID, :AssetID, :ReportDate, :RepairCost, :Description)", olapConn);
+
+                    cmd.Parameters.Add("ReportID", reportId++);
+                    cmd.Parameters.Add("AssetID", assetReader["AssetID"]);
+                    cmd.Parameters.Add("ReportDate", DateTime.Now.AddDays(-Random.Shared.Next(1, 90)));
+                    cmd.Parameters.Add("RepairCost", Random.Shared.Next(50, 500));
+                    cmd.Parameters.Add("Description", "Generated damage report for maintenance");
+
+                    await cmd.ExecuteNonQueryAsync();
+                    count++;
+                }
+                catch (Exception ex)
+                {
+                    log.Add($"Error inserting damage report for asset {assetReader["AssetID"]}: {ex.Message}");
+                }
+            }
+            log.Add($"FactDamageReport loaded successfully. {count} records inserted.");
+    }
+
+    private async Task LoadFactRentalHistoryAsync(OracleConnection oltpConn, OracleConnection olapConn, List<string> log)
+    {
+        log.Add("Loading FactRentalHistory...");
+        using var reader = await new OracleCommand(
+            @"SELECT ar.AssetRentID, ar.AssetID, ar.RenterID, ar.StartDate, ar.EndDate, a.MonthlyRent
+              FROM AssetRent ar JOIN Asset a ON ar.AssetID = a.AssetID", oltpConn).ExecuteReaderAsync();
+
+        int count = 0;
         while (await reader.ReadAsync())
         {
-            var cmd = new OdbcCommand(
-                @"INSERT INTO FactRentalHistory 
-                (DimAssetAssetID, DimRenterRenterID, StartDate, EndDate, RentAmount) 
-                VALUES (?, ?, ?, ?, ?); SELECT SCOPE_IDENTITY();", olapConn);
+            using var cmd = new OracleCommand(
+                @"INSERT INTO FactRentalHistory (HistoryID, DimAssetID, DimRenterID, StartDate, EndDate, RentAmount)
+                  VALUES (history_seq.NEXTVAL, :AssetID, :RenterID, :StartDate, :EndDate, :RentAmount)", olapConn);
 
-            cmd.Parameters.AddWithValue("@DimAssetAssetID", reader["AssetID"]);
-            cmd.Parameters.AddWithValue("@DimRenterRenterID", reader["RenterID"]);
-            cmd.Parameters.AddWithValue("@StartDate", reader["StartDate"]);
-            cmd.Parameters.AddWithValue("@EndDate", reader["EndDate"]);
-            cmd.Parameters.AddWithValue("@RentAmount", reader["MonthlyRent"]);
+            cmd.Parameters.Add("AssetID", reader["AssetID"]);
+            cmd.Parameters.Add("RenterID", reader["RenterID"]);
+            cmd.Parameters.Add("StartDate", reader["StartDate"]);
+            cmd.Parameters.Add("EndDate", reader["EndDate"]);
+            cmd.Parameters.Add("RentAmount", reader["MonthlyRent"]);
 
-            var newId = Convert.ToInt32(await cmd.ExecuteScalarAsync());
-            log.AppendLine($"Inserted HistoryID {newId}");
+            await cmd.ExecuteNonQueryAsync();
+            count++;
         }
-        log.AppendLine("FactRentalHistory loaded successfully.");
+        log.Add($"FactRentalHistory loaded successfully. {count} records inserted.");
     }
 }

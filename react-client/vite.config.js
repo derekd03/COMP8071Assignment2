@@ -8,6 +8,7 @@ export default defineConfig({
         outDir: '../app/wwwroot/', // This is the default, but you can change it
         // For example, to output to a 'public/build' directory:
         // outDir: 'public/build',
+        sourcemap: false,
       },
   server: {
     proxy: {

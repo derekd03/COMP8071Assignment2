@@ -1,5 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
-using System.Data.Odbc;
+using Oracle.ManagedDataAccess.Client;
 using System.Text;
 
 [ApiController]
@@ -16,38 +16,40 @@ public class ETLController : ControllerBase
     [HttpGet("run")]
     public async Task<IActionResult> RunETL()
     {
-        var log = new StringBuilder();
-        log.AppendLine("Starting ETL...");
+        var logList = new List<string>();
+        logList.Add("Starting ETL...");
 
         try
         {
-            await _etlService.RunETLAsync(log);
-            log.AppendLine("ETL job completed successfully!");
+            await _etlService.RunETLAsync(logList);
+            logList.Add("ETL job completed successfully!");
         }
         catch (Exception ex)
         {
-            log.AppendLine($"ETL failed: {ex.Message}");
+            logList.Add($"ETL failed: {ex.Message}");
         }
 
-        return Content(log.ToString(), "text/plain");
+        return Ok(new { logs = logList });
     }
     
     [HttpGet("purge")]
     public async Task<IActionResult> RunETLClear()
     {
-        var log = new StringBuilder();
-        log.AppendLine("Clearing...");
+        var logList = new List<string>();
+        logList.Add("Clearing OLAP tables...");
 
         try
         {
-            await _etlService.ClearETLAsync(log);
-            log.AppendLine("Clear completed successfully!");
+            await using var olapConn = new OracleConnection(_etlService._olapConnectionString);
+            await olapConn.OpenAsync();
+            await _etlService.ClearOlapTablesAsync(olapConn, logList);
+            logList.Add("Clear completed successfully!");
         }
         catch (Exception ex)
         {
-            log.AppendLine($"Clear failed: {ex.Message}");
+            logList.Add($"Clear failed: {ex.Message}");
         }
 
-        return Content(log.ToString(), "text/plain");
+        return Ok(new { logs = logList });
     }
 }

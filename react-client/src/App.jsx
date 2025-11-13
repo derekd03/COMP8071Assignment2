@@ -4,11 +4,9 @@ import './styles/ProfitChart.css';
 
 function App() {
   
-
   return (
     <div className="App">
       <ProfitChart />
-
     </div>
   );
 }
