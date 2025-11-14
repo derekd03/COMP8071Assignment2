@@ -1,11 +1,11 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Bar } from 'react-chartjs-2';
-import { Chart as ChartJS, CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend } from 'chart.js';
+import { Chart as ChartJS, CategoryScale, LinearScale, BarElement, ArcElement, Title, Tooltip, Legend } from 'chart.js';
 import { Printer, FileSpreadsheet, Eye, EyeOff, DatabaseBackup, DatabaseZap } from 'lucide-react';
 
 import { useReward } from 'partycles';
 
-ChartJS.register(CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend);
+ChartJS.register(CategoryScale, LinearScale, BarElement, ArcElement, Title, Tooltip, Legend);
 
 // --- Configuration ---
 const BASE_URL = 'http://localhost:5292';
@@ -25,6 +25,7 @@ const ProfitChart = () => {
   const [data, setData] = useState([]);
   const [metric, setMetric] = useState('profit');
   const [showTable, setShowTable] = useState(false);
+  const [showChart, setShowChart] = useState(true);
   const [loading, setLoading] = useState(false);
   const [isDbEmpty, setIsDbEmpty] = useState(true);
   const [theme, setTheme] = useState('light');
@@ -66,6 +67,17 @@ const ProfitChart = () => {
     fetchMetricData();
   }, [metric, fetchMetricData]);
 
+  // --- Show table automatically for specific metrics ---
+  useEffect(() => {
+    setShowTable(true);
+    if (isTableOnlyMetric(metric)) {
+      setShowChart(false);
+    } else {
+      setShowChart(true);
+    }
+  }, [metric]);
+
+
   const labelKey = data.length ? Object.keys(data[0])[0] : 'label';
   const valueKey =
     data.length && Object.keys(data[0]).find(k => k.toLowerCase().includes('metric'))
@@ -85,21 +97,21 @@ const ProfitChart = () => {
   };
 
   const chartOptions = {
-    responsive: true,
-    maintainAspectRatio: false,
-    plugins: {
-      legend: { display: true, labels: { color: theme === 'dark' ? '#ddd' : '#222' } },
-      title: {
-        display: true,
-        text: `${labelMap[metric]} Analysis`,
-        color: theme === 'dark' ? '#fff' : '#000'
-      }
-    },
-    scales: {
-      x: { ticks: { color: theme === 'dark' ? '#ccc' : '#333' } },
-      y: { ticks: { color: theme === 'dark' ? '#ccc' : '#333' } }
-    }
-  };
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { labels: { color: theme === "dark" ? "#ddd" : "#222" } },
+          title: {
+            display: true,
+            text: `${labelMap[metric]} Analysis`,
+            color: theme === "dark" ? "#fff" : "#000"
+          }
+        },
+        scales: {
+          x: { ticks: { color: theme === "dark" ? "#ccc" : "#333" } },
+          y: { ticks: { color: theme === "dark" ? "#ccc" : "#333" } }
+        }
+      };
 
   const handleDownloadExcel = async () => {
     setLoading(true);
@@ -140,6 +152,9 @@ const ProfitChart = () => {
     }
   };
 
+  const isTableOnlyMetric = (metric) => 
+  ["payroll_rollup", "invoice_cube", "invoice_grouping", "shift_groupingsets"].includes(metric);
+
   return (
     <div className={`dashboard ${theme}`} data-theme={theme}>
       <header>
@@ -167,6 +182,12 @@ const ProfitChart = () => {
               <FileSpreadsheet size={16} />
               {loading ? 'Preparing…' : 'Download Excel'}
             </button>
+            <button 
+              onClick={() => setShowChart(c => !c)} 
+              disabled={isTableOnlyMetric(metric)}
+            >
+              {showChart ? <><EyeOff size={16} /> Hide Chart</> : <><Eye size={16} /> Show Chart</>}
+            </button>
             <button onClick={() => setShowTable(p => !p)}>
               {showTable ? <><EyeOff size={16} /> Hide Table</> : <><Eye size={16} /> Show Table</>}
             </button>
@@ -177,17 +198,19 @@ const ProfitChart = () => {
         </div>
       </header>
 
-      <div id='rewardId' className="chart-wrapper">
-        {loading ? (
-          <div className="loading">Loading data...</div>
-        ) : data.length > 0 ? (
-          <Bar data={chartData} options={chartOptions} />
-        ) : (
-          <div className="no-data">
-            {isDbEmpty ? 'No data available. Run ETL to populate the database.' : 'No data found for this metric.'}
-          </div>
-        )}
-      </div>
+      {showChart && !isTableOnlyMetric(metric) && (
+        <div id='rewardId' className="chart-wrapper">
+          {loading ? (
+            <div className="loading">Loading data...</div>
+          ) : data.length > 0 ? (
+            <Bar data={chartData} options={chartOptions} />
+          ) : (
+            <div className="no-data">
+              {isDbEmpty ? 'No data available. Run ETL to populate the database.' : 'No data found for this metric.'}
+            </div>
+          )}
+        </div>
+      )}
 
       {showTable && data.length > 0 && (
         <div className="table-container">
