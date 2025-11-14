@@ -146,26 +146,26 @@ namespace app.Controllers
             {
                 case "collectionrate":
                     return @"
-                WITH Monthly AS (
-                    SELECT
-                        TRUNC(InvoiceDate, 'MM') AS MonthStart,
-                        SUM(TotalAmount) AS TotalInvoiced,
-                        SUM(CASE WHEN IsPaid = '1' THEN TotalAmount ELSE 0 END) AS TotalPaid,
-                        COUNT(*) AS InvoiceCount,
-                        SUM(CASE WHEN IsPaid = '1' THEN 1 ELSE 0 END) AS PaidCount
-                    FROM FactInvoice
-                    GROUP BY TRUNC(InvoiceDate, 'MM')
-                )
-                SELECT
-                    TO_CHAR(MonthStart, 'YYYY-MM') AS Month,
-                    InvoiceCount,
-                    PaidCount,
-                    TotalInvoiced,
-                    TotalPaid,
-                    CASE WHEN TotalInvoiced = 0 THEN 0
-                        ELSE (TotalPaid * 100 / TotalInvoiced) END AS MetricValue
-                FROM Monthly
-                ORDER BY Month";
+                        WITH Monthly AS (
+                            SELECT
+                                TRUNC(InvoiceDate, 'MM') AS MonthStart,
+                                SUM(TotalAmount) AS TotalInvoiced,
+                                SUM(CASE WHEN TRIM(IsPaid) = '1' THEN TotalAmount ELSE 0 END) AS TotalPaid,
+                                COUNT(*) AS InvoiceCount,
+                                SUM(CASE WHEN TRIM(IsPaid) = '1' THEN 1 ELSE 0 END) AS PaidCount
+                            FROM FactInvoice
+                            GROUP BY TRUNC(InvoiceDate, 'MM')
+                        )
+                        SELECT
+                            TO_CHAR(MonthStart, 'YYYY-MM') AS Month,
+                            InvoiceCount,
+                            PaidCount,
+                            TotalInvoiced,
+                            TotalPaid,
+                            TO_CHAR((TotalPaid * 100 / NULLIF(TotalInvoiced, 0)), 'FM9999999990.999999') AS MetricValue
+                        FROM Monthly
+                        ORDER BY Month
+                        ";
 
                 case "staffing":
                     return @"
