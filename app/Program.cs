@@ -2,7 +2,7 @@ using Oracle.ManagedDataAccess.Client;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
+// Add services to the container
 builder.Services.AddOpenApi();
 builder.Services.AddControllers();
 
@@ -24,11 +24,19 @@ string olapConnStr = builder.Configuration.GetConnectionString("OLAPConnection")
 Console.WriteLine("Database connections configured");
 Console.WriteLine("Visit http://localhost:5292/api/etl/run to run OLTP -> ETL -> OLAP.");
 
-// Register ETL service
-builder.Services.AddSingleton(new ETLService(oltpConnStr, olapConnStr));
-builder.Services.AddScoped<OracleConnection>(provider => new OracleConnection(oltpConnStr));
+// Register services
+builder.Services.AddSingleton<ETLService>(sp => new ETLService(oltpConnStr, olapConnStr));
+builder.Services.AddSingleton<OLTPSeedService>(sp => new OLTPSeedService(oltpConnStr));
+builder.Services.AddScoped<OracleConnection>(sp => new OracleConnection(oltpConnStr));
 
 var app = builder.Build();
+
+// Seed the OLTP database at startup
+using (var scope = app.Services.CreateScope())
+{
+    var seedService = scope.ServiceProvider.GetRequiredService<OLTPSeedService>();
+    await seedService.SeedIfEmptyAsync("SeedData/CareServicesOLTPInsertion.sql");
+}
 
 // Configure the HTTP request pipeline
 if (app.Environment.IsDevelopment())

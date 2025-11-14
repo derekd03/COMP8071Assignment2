@@ -245,6 +245,60 @@ namespace app.Controllers
                 FROM Revenue r
                 LEFT JOIN AllocatedCost ac ON ac.ServiceID = r.ServiceID
                 ORDER BY MetricValue DESC, r.ServiceName";
+
+                case "payroll_rollup":
+                return @"
+                SELECT
+                    e.Name AS Employee,
+                    EXTRACT(YEAR FROM p.PayDate) AS PayYear,
+                    SUM(p.NetPay) AS TotalNetPay
+                FROM FactPayroll p
+                JOIN DimEmployee e ON e.EmployeeID = p.DimEmployeeID
+                GROUP BY ROLLUP (e.Name, EXTRACT(YEAR FROM p.PayDate))
+                ORDER BY e.Name NULLS LAST, PayYear NULLS LAST";
+
+                case "invoice_cube":
+                return @"
+                SELECT
+                    COALESCE(c.Name, 'ALL CLIENTS') AS Client,
+                    COALESCE(s.ServiceName, 'ALL SERVICES') AS Service,
+                    COALESCE(f.IsPaid, 'ALL') AS IsPaid,
+                    SUM(f.TotalAmount) AS Revenue
+                FROM FactInvoice f
+                JOIN DimClient c ON c.ClientID = f.DimClientID
+                JOIN DimService s ON s.ServiceID = f.DimServiceID
+                GROUP BY CUBE (c.Name, s.ServiceName, f.IsPaid)
+                ORDER BY Client, Service, IsPaid";
+
+                case "invoice_grouping":
+                return @"
+                SELECT
+                    CASE WHEN GROUPING(c.Name) = 1 THEN 'ALL CLIENTS' ELSE c.Name END AS Client,
+                    CASE WHEN GROUPING(s.ServiceName) = 1 THEN 'ALL SERVICES' ELSE s.ServiceName END AS Service,
+                    SUM(f.TotalAmount) AS Revenue,
+                    GROUPING_ID(c.Name, s.ServiceName) AS GroupingID,
+                    GROUP_ID() As GroupID
+                FROM FactInvoice f
+                JOIN DimClient c ON c.ClientID = f.DimClientID
+                JOIN DimService s ON s.ServiceID = f.DimServiceID
+                GROUP BY GROUPING SETS ((c.Name, s.ServiceName), (c.Name), (s.ServiceName), ())
+                ORDER BY GroupingID, Client NULLS LAST, Service NULLS LAST";
+
+                case "shift_groupingsets":
+                return @"
+                SELECT
+                    e.Name AS Employee,
+                    s.IsOnCall,
+                    SUM((s.EndTime - s.StartTime) * 24) AS HoursWorked
+                FROM FactShifts s
+                JOIN DimEmployee e ON e.EmployeeID = s.DimEmployeeID
+                GROUP BY GROUPING SETS (
+                    (e.Name, s.IsOnCall),   -- detailed
+                    (e.Name),               -- subtotal per employee
+                    (s.IsOnCall),           -- subtotal per on-call status
+                    ()
+                )
+                ORDER BY Employee NULLS LAST, IsOnCall NULLS LAST";
             }
         }
 

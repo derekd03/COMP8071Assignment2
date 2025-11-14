@@ -14,7 +14,11 @@ const labelMap = {
   profit: 'Profit',
   damages: 'Maintenance Cost',
   staffing: 'Demand vs Staffing Capacity',
-  collectionrate: 'Customer Retention Rate'
+  collectionrate: 'Customer Retention Rate',
+  payroll_rollup: 'Payroll (ROLLUP)',
+  invoice_cube: 'Invoice Revenue (CUBE)',
+  invoice_grouping: 'Invoice Revenue (GROUPING)',
+  shift_groupingsets: 'Shift Breakdown (GROUPING SETS)',
 };
 
 const ProfitChart = () => {
@@ -149,6 +153,10 @@ const ProfitChart = () => {
             <option value="damages">Maintenance Cost</option>
             <option value="staffing">Demand vs Staffing Capacity</option>
             <option value="collectionrate">Customer Retention</option>
+            <option value="payroll_rollup">Payroll (ROLLUP)</option>
+            <option value="invoice_cube">Invoice Revenue (CUBE)</option>
+            <option value="invoice_grouping">Invoice Revenue (GROUPING)</option>
+            <option value="shift_groupingsets">Shift Breakdown (GROUPING SETS)</option>
           </select>
 
           <div className="button-group">
